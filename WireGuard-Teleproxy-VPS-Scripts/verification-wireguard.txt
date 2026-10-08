@@ -1,0 +1,97 @@
+cat > verify-wireguard.sh <<'EOF'
+#!/bin/bash
+set -u
+
+ok=0
+fail=0
+
+pass() { echo "OK: $1"; ok=$((ok+1)); }
+bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+
+INFO_FILE="/root/WIREGUARD-VPS-INFO.txt"
+
+echo "WireGuard verification"
+echo "======================"
+
+if [ -f "$INFO_FILE" ]; then
+  pass "$INFO_FILE exists"
+else
+  bad "$INFO_FILE missing"
+fi
+
+if command -v cloud-init >/dev/null 2>&1; then
+  CLOUD_STATUS="$(cloud-init status --long 2>&1 || true)"
+  if echo "$CLOUD_STATUS" | grep -q "status: done" && echo "$CLOUD_STATUS" | grep -q "errors: \[\]"; then
+    pass "cloud-init finished with no errors"
+  else
+    bad "cloud-init has errors or is not done"
+  fi
+else
+  echo "SKIP: cloud-init command not found"
+fi
+
+systemctl is-active --quiet wg-quick@wg0 \
+  && pass "WireGuard service active" || bad "WireGuard service not active"
+
+wg show wg0 >/dev/null 2>&1 \
+  && pass "wg0 interface exists" || bad "wg0 interface missing"
+
+[ "$(wg show wg0 peers 2>/dev/null | wc -l)" -eq 5 ] \
+  && pass "WireGuard has 5 peers" || bad "WireGuard does not have 5 peers"
+
+ss -u -l -n | grep -q ':51820' \
+  && pass "WireGuard listening on UDP 51820" || bad "WireGuard not listening on UDP 51820"
+
+missing_conf=0
+missing_qr=0
+for i in 1 2 3 4 5; do
+  test -s /etc/wireguard/clients/client${i}.conf || missing_conf=1
+  test -s /etc/wireguard/clients/client${i}-qr.txt || missing_qr=1
+done
+
+[ "$missing_conf" = "0" ] \
+  && pass "All WireGuard client configs exist" || bad "Some WireGuard client configs missing"
+[ "$missing_qr" = "0" ] \
+  && pass "All WireGuard QR files exist" || bad "Some WireGuard QR files missing"
+
+SERVER_IP=""
+if [ -f "$INFO_FILE" ]; then
+  SERVER_IP="$(awk -F': ' '/Server public IP/ {print $2; exit}' "$INFO_FILE")"
+fi
+
+if [ -n "$SERVER_IP" ]; then
+  grep -q "Endpoint = ${SERVER_IP}:51820" /etc/wireguard/clients/client1.conf 2>/dev/null \
+    && pass "WireGuard client endpoint uses detected public IP" || bad "WireGuard client endpoint does not match detected public IP"
+else
+  bad "WireGuard public IP could not be read"
+fi
+
+echo
+echo "Listening port:"
+ss -ulpn | grep ':51820' || true
+
+echo
+echo "WireGuard status:"
+wg show || true
+
+echo
+echo "Access details:"
+echo "WireGuard QR:"
+echo "cat /etc/wireguard/clients/client1-qr.txt"
+if [ -n "$SERVER_IP" ]; then
+  echo
+  echo "PC config download:"
+  echo "scp root@${SERVER_IP}:/etc/wireguard/clients/client1.conf ."
+fi
+
+echo
+echo "Passed: $ok"
+echo "Failed: $fail"
+
+[ "$fail" -eq 0 ] && echo "Everything looks good." && exit 0
+echo "Something needs attention."
+exit 1
+EOF
+
+chmod +x verify-wireguard.sh
+sudo bash verify-wireguard.sh

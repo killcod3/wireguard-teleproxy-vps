@@ -1,0 +1,91 @@
+cat > verify-vps.sh <<'EOF'
+#!/bin/bash
+set -u
+
+ok=0
+fail=0
+
+pass() { echo "OK: $1"; ok=$((ok+1)); }
+bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+
+echo "New VPS verification"
+echo "===================="
+
+if [ -f /root/NEW-VPS-INFO.txt ]; then
+  pass "/root/NEW-VPS-INFO.txt exists"
+else
+  bad "/root/NEW-VPS-INFO.txt missing"
+fi
+
+cloud-init status --long | grep -q "status: done" && cloud-init status --long | grep -q "errors: \[\]" \
+  && pass "cloud-init finished with no errors" || bad "cloud-init has errors or is not done"
+
+systemctl is-active --quiet wg-quick@wg0 \
+  && pass "WireGuard service active" || bad "WireGuard service not active"
+
+systemctl is-active --quiet teleproxy \
+  && pass "Teleproxy service active" || bad "Teleproxy service not active"
+
+wg show wg0 >/dev/null 2>&1 \
+  && pass "wg0 interface exists" || bad "wg0 interface missing"
+
+[ "$(wg show wg0 peers 2>/dev/null | wc -l)" -eq 5 ] \
+  && pass "WireGuard has 5 peers" || bad "WireGuard does not have 5 peers"
+
+ss -u -l -n | grep -q ':51820' \
+  && pass "WireGuard listening on UDP 51820" || bad "WireGuard not listening on UDP 51820"
+
+ss -t -l -n | grep -q ':443' \
+  && pass "Teleproxy listening on TCP 443" || bad "Teleproxy not listening on TCP 443"
+
+for i in 1 2 3 4 5; do
+  test -s /etc/wireguard/clients/client${i}.conf || missing_conf=1
+  test -s /etc/wireguard/clients/client${i}-qr.txt || missing_qr=1
+done
+
+[ "${missing_conf:-0}" = "0" ] \
+  && pass "All WireGuard client configs exist" || bad "Some WireGuard client configs missing"
+
+[ "${missing_qr:-0}" = "0" ] \
+  && pass "All WireGuard QR files exist" || bad "Some WireGuard QR files missing"
+
+test -s /etc/teleproxy/teleproxy.env \
+  && pass "Teleproxy env file exists" || bad "Teleproxy env file missing"
+
+test -s /etc/teleproxy/aes-pwd.txt \
+  && pass "Teleproxy AES password file exists" || bad "Teleproxy AES password file missing"
+
+echo
+echo "Listening ports:"
+ss -tulpn | grep -E ':443|:51820' || true
+
+echo
+echo "Teleproxy logs:"
+journalctl -u teleproxy -n 12 --no-pager -l || true
+
+echo
+echo "Access details:"
+if [ -f /root/NEW-VPS-INFO.txt ]; then
+  SERVER_IP=$(awk -F': ' '/Server public IP/ {print $2}' /root/NEW-VPS-INFO.txt)
+  SECRET=$(awk -F': ' '/Secret/ {print $2}' /root/NEW-VPS-INFO.txt)
+  echo "Teleproxy link:"
+  echo "https://t.me/proxy?server=${SERVER_IP}&port=443&secret=${SECRET}"
+  echo
+  echo "WireGuard QR:"
+  echo "cat /etc/wireguard/clients/client1-qr.txt"
+  echo
+  echo "PC config download:"
+  echo "scp root@${SERVER_IP}:/etc/wireguard/clients/client1.conf ."
+fi
+
+echo
+echo "Passed: $ok"
+echo "Failed: $fail"
+
+[ "$fail" -eq 0 ] && echo "Everything looks good." && exit 0
+echo "Something needs attention."
+exit 1
+EOF
+
+chmod +x verify-vps.sh
+bash verify-vps.sh

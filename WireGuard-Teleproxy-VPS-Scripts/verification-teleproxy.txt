@@ -1,0 +1,96 @@
+cat > verify-teleproxy.sh <<'EOF'
+#!/bin/bash
+set -u
+
+ok=0
+fail=0
+
+pass() { echo "OK: $1"; ok=$((ok+1)); }
+bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+
+INFO_FILE="/root/TELEPROXY-VPS-INFO.txt"
+ENV_FILE="/etc/teleproxy/teleproxy.env"
+
+echo "Teleproxy verification"
+echo "======================"
+
+if [ -f "$INFO_FILE" ]; then
+  pass "$INFO_FILE exists"
+else
+  bad "$INFO_FILE missing"
+fi
+
+if command -v cloud-init >/dev/null 2>&1; then
+  CLOUD_STATUS="$(cloud-init status --long 2>&1 || true)"
+  if echo "$CLOUD_STATUS" | grep -q "status: done" && echo "$CLOUD_STATUS" | grep -q "errors: \[\]"; then
+    pass "cloud-init finished with no errors"
+  else
+    bad "cloud-init has errors or is not done"
+  fi
+else
+  echo "SKIP: cloud-init command not found"
+fi
+
+systemctl is-active --quiet teleproxy \
+  && pass "Teleproxy service active" || bad "Teleproxy service not active"
+
+test -x /usr/local/bin/teleproxy \
+  && pass "Teleproxy binary is executable" || bad "Teleproxy binary missing or not executable"
+
+test -s "$ENV_FILE" \
+  && pass "Teleproxy env file exists" || bad "Teleproxy env file missing"
+
+test -s /etc/teleproxy/aes-pwd.txt \
+  && pass "Teleproxy AES password file exists" || bad "Teleproxy AES password file missing"
+
+ss -t -l -n | grep -q ':443' \
+  && pass "Teleproxy listening on TCP 443" || bad "Teleproxy not listening on TCP 443"
+
+SERVER_IP=""
+SECRET=""
+if [ -f "$INFO_FILE" ]; then
+  SERVER_IP="$(awk -F': ' '/Server public IP/ {print $2; exit}' "$INFO_FILE")"
+fi
+if [ -f "$ENV_FILE" ]; then
+  SECRET="$(awk -F= '$1 == "SECRET" {print $2; exit}' "$ENV_FILE")"
+fi
+
+if [ -n "$SERVER_IP" ]; then
+  pass "Teleproxy public IP is available"
+else
+  bad "Teleproxy public IP could not be read"
+fi
+if [ -n "$SECRET" ]; then
+  pass "Teleproxy secret is available"
+else
+  bad "Teleproxy secret could not be read"
+fi
+
+echo
+echo "Listening port:"
+ss -tlpn | grep ':443' || true
+
+echo
+echo "Teleproxy logs:"
+journalctl -u teleproxy -n 12 --no-pager -l || true
+
+echo
+echo "Access details:"
+if [ -n "$SERVER_IP" ] && [ -n "$SECRET" ]; then
+  echo "Teleproxy link:"
+  echo "https://t.me/proxy?server=${SERVER_IP}&port=443&secret=${SECRET}"
+else
+  echo "Teleproxy link unavailable because the public IP or secret is missing."
+fi
+
+echo
+echo "Passed: $ok"
+echo "Failed: $fail"
+
+[ "$fail" -eq 0 ] && echo "Everything looks good." && exit 0
+echo "Something needs attention."
+exit 1
+EOF
+
+chmod +x verify-teleproxy.sh
+sudo bash verify-teleproxy.sh
